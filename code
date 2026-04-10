@@ -1,0 +1,115 @@
+from flask import Flask, request, render_template, jsonify, url_for
+import tensorflow as tf
+import numpy as np
+from PIL import Image
+import os
+import logging
+
+# Set up logging FIRST before anything else
+logging.basicConfig(level=logging.DEBUG)
+
+# Initialize Flask app
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+
+# Ensure upload folder exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Load pre-trained model
+MODEL_PATH = "best_model_t1.keras"
+model = None
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+    logging.debug("Model loaded successfully.")
+except Exception as e:
+    logging.error(f"Error loading model: {str(e)}")
+
+# Class labels (must match the order used during model training)
+CLASS_LABELS = ["Normal", "Left Foraminal Narrowing", "Right Foraminal Narrowing", "Spondylolisthesis", "DDD"]
+
+# Confidence threshold
+CONFIDENCE_THRESHOLD = 0.75
+
+
+# Preprocess image
+def preprocess_image(image):
+    try:
+        image = image.resize((224, 224))   # Resize to model input size
+        image = np.array(image) / 255.0    # Normalize to [0, 1]
+        image = np.expand_dims(image, axis=0)  # Add batch dimension -> (1, 224, 224, 3)
+        logging.debug("Image preprocessed successfully.")
+        return image
+    except Exception as e:
+        logging.error(f"Error in preprocessing image: {str(e)}")
+        return None
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+
+        # Guard: model must be loaded
+        if model is None:
+            logging.error("Model is not loaded.")
+            return render_template("index.html", error="Model could not be loaded. Please check the server.")
+
+        if "file" not in request.files:
+            logging.error("No file uploaded.")
+            return render_template("index.html", error="No file uploaded.")
+
+        file = request.files["file"]
+
+        if file.filename == "":
+            logging.error("No file selected.")
+            return render_template("index.html", error="No file selected.")
+
+        try:
+            # Save the uploaded file
+            filename = file.filename
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+
+            # Open and preprocess image
+            image = Image.open(filepath).convert("RGB")
+            processed_image = preprocess_image(image)
+
+            if processed_image is None:
+                return render_template("index.html", error="Error processing image.")
+
+            # Run prediction
+            prediction = model.predict(processed_image)
+            logging.debug(f"Raw prediction: {prediction}")
+
+            # Get the predicted class index and confidence
+            predicted_index = int(np.argmax(prediction[0]))
+            confidence = float(np.max(prediction[0]))
+            result = CLASS_LABELS[predicted_index]
+
+            logging.debug(f"Predicted class: {result}, Confidence: {confidence:.2f}")
+
+            # Determine color class for UI styling
+            if confidence < CONFIDENCE_THRESHOLD:
+                result = "Uncertain (Need Further Diagnosis)"
+                color_class = "uncertain"
+            elif predicted_index == 0:
+                color_class = "normal"
+            else:
+                color_class = "ddd"
+
+            return render_template(
+                "index.html",
+                result=result,
+                confidence=round(confidence * 100, 2),
+                color=color_class,
+                filename=filename
+            )
+
+        except Exception as e:
+            logging.error(f"Error processing image: {str(e)}")
+            return render_template("index.html", error=f"Error processing image: {str(e)}")
+
+    return render_template("index.html")
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
